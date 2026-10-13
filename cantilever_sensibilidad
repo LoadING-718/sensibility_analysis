@@ -1,0 +1,196 @@
+%% CANTILEVER PIEZOELECTRICO: MODELO 1 GDL Y SENSIBILIDAD
+% Modelo lineal acoplado con excitacion armonica de base.
+
+
+clear; clc; close all;
+
+%% 1. Parametros nominales
+p.m     = 0.023;           % Masa modal [kg]
+p.fn    = 28;              % Frecuencia natural mecanica [Hz]
+p.zeta  = 0.025;           % Amortiguamiento relativo [-]
+p.theta = 1.0e-3;          % Acoplamiento modal [N/V]
+p.Cp    = 30e-9;           % Capacitancia [F]
+p.R     = 100e3;           % Resistencia [ohm]
+p.a0    = 0.5*9.80665;     % Aceleracion pico de base [m/s^2]
+p.Gamma = 1.0;             % Participacion modal de base [-]
+
+% Rigidez y amortiguamiento equiv.
+p.k = p.m*(2*pi*p.fn)^2;
+p.c = 2*p.zeta*p.m*(2*pi*p.fn);
+
+fprintf('Rigidez k = %.4f N/m\n', p.k);
+fprintf('Amortiguamiento c = %.6f N*s/m\n', p.c);
+
+%% 2. Barrido de frec.
+f = linspace(5, 60, 1600);  % Hz
+[P, Vpk, Qpk] = respuesta(p, f);
+
+[Pm, imax] = max(P);
+fprintf('\nMaximo en barrido:\n');
+fprintf('Frecuencia = %.4f Hz\n', f(imax));
+fprintf('Potencia   = %.6e W (%.4f uW)\n', Pm, Pm*1e6);
+fprintf('Voltaje pico = %.6f V\n', Vpk(imax));
+fprintf('Desplazamiento pico = %.6e m\n', Qpk(imax));
+
+% Respuesta a frec. nom. mecanica
+[Pnom, Vnom, Qnom] = respuesta(p, p.fn);
+fprintf('\nA fn = %.2f Hz:\n', p.fn);
+fprintf('Potencia = %.6e W\n', Pnom);
+fprintf('Voltaje pico = %.6f V\n', Vnom);
+fprintf('Desplazamiento pico = %.6e m\n', Qnom);
+
+%% 3. Graficas de respuesta
+figure('Name','Respuesta en frecuencia');
+
+subplot(3,1,1);
+plot(f, Qpk*1e3, 'LineWidth', 1.5);
+grid on;
+ylabel('|Q| [mm]');
+title('Respuesta dinamica del cosechador');
+
+subplot(3,1,2);
+plot(f, Vpk, 'LineWidth', 1.5);
+grid on;
+ylabel('|V| [V]');
+
+subplot(3,1,3);
+plot(f, P*1e6, 'LineWidth', 1.5);
+grid on;
+xlabel('Frecuencia [Hz]');
+ylabel('P promedio [\muW]');
+
+%% 4. Sensibilidad local por diferencias centrales
+
+nombres = {'m','fn','zeta','theta','Cp','R','a0'};
+delta = 0.01;  % Perturbacion relativa
+
+S = zeros(numel(nombres),1);
+Pmas = zeros(size(S));
+Pmenos = zeros(size(S));
+
+for i = 1:numel(nombres)
+    nombre = nombres{i};
+
+    pmas = p;
+    pmenos = p;
+
+    valor = p.(nombre);
+    pmas.(nombre) = valor*(1+delta);
+    pmenos.(nombre) = valor*(1-delta);
+
+    % Mantener k y c consistentes si cambia m, fn o zeta.
+    pmas = actualizar_mc(pmas, nombre);
+    pmenos = actualizar_mc(pmenos, nombre);
+
+    % Frecuencia de evaluacion fija: fn nominal original.
+    [Pmas(i),~,~] = respuesta(pmas, p.fn);
+    [Pmenos(i),~,~] = respuesta(pmenos, p.fn);
+
+    S(i) = (Pmas(i)-Pmenos(i))/(2*delta*Pnom);
+end
+
+T = table(nombres(:), Pmas, Pmenos, S, ...
+    'VariableNames', {'Parametro','P_mas_W','P_menos_W', ...
+    'Sensibilidad_normalizada'});
+T = sortrows(T,'Sensibilidad_normalizada','descend');
+
+disp('Sensibilidad local a frecuencia fija:');
+disp(T);
+
+figure('Name','Sensibilidad local');
+bar(categorical(T.Parametro), T.Sensibilidad_normalizada);
+ylabel('S_i* [-]');
+title('Sensibilidad normalizada de potencia');
+grid on;
+
+%% 5. Sensibilidad de potencia max. en frecuencia
+
+Smax = zeros(numel(nombres),1);
+
+for i = 1:numel(nombres)
+    nombre = nombres{i};
+    pmas = p;
+    pmenos = p;
+
+    valor = p.(nombre);
+    pmas.(nombre) = valor*(1+delta);
+    pmenos.(nombre) = valor*(1-delta);
+
+    pmas = actualizar_mc(pmas, nombre);
+    pmenos = actualizar_mc(pmenos, nombre);
+
+    Pplus = respuesta(pmas, f);
+    Pminus = respuesta(pmenos, f);
+
+    Pmaxplus = max(Pplus);
+    Pmaxminus = max(Pminus);
+
+    Smax(i) = (Pmaxplus-Pmaxminus)/(2*delta*Pm);
+end
+
+Tmax = table(nombres(:), Smax, ...
+    'VariableNames', {'Parametro','Sensibilidad_Pmax'});
+Tmax = sortrows(Tmax,'Sensibilidad_Pmax','descend');
+
+disp('Sensibilidad de la potencia maxima en el barrido:');
+disp(Tmax);
+
+%% 6. Efecto de resistencia de carga
+Rvec = logspace(3,7,240);
+PR = zeros(size(Rvec));
+
+for i = 1:numel(Rvec)
+    pr = p;
+    pr.R = Rvec(i);
+    Ptemp = respuesta(pr, f);
+    PR(i) = max(Ptemp);
+end
+
+figure('Name','Optimizacion de resistencia');
+semilogx(Rvec, PR*1e6, 'LineWidth', 1.5);
+grid on;
+xlabel('Resistencia R [ohm]');
+ylabel('Maximo de potencia [\muW]');
+title('Potencia maxima vs resistencia de carga');
+
+[PRbest, ir] = max(PR);
+fprintf('\nCarga optima dentro del barrido:\n');
+fprintf('R = %.4g ohm\n', Rvec(ir));
+fprintf('Pmax = %.6e W\n', PRbest);
+
+%% 7. Funciones locales
+
+function [P,Vpk,Qpk] = respuesta(p,f)
+    % Solucion fasorial del modelo acoplado.
+    % Qpk y Vpk son amplitudes pico.
+    P = zeros(size(f));
+    Vpk = zeros(size(f));
+    Qpk = zeros(size(f));
+
+    for n = 1:numel(f)
+        w = 2*pi*f(n);
+
+        Zm = p.k - p.m*w^2 + 1i*p.c*w;
+        Ze = 1/p.R + 1i*w*p.Cp;
+
+        A = [Zm, -p.theta;
+             1i*w*p.theta, Ze];
+
+        b = [-p.m*p.Gamma*p.a0;
+              0];
+
+        sol = A\b;
+
+        Qpk(n) = abs(sol(1));
+        Vpk(n) = abs(sol(2));
+        P(n) = Vpk(n)^2/(2*p.R);
+    end
+end
+
+function p = actualizar_mc(p,nombre)
+   
+    if any(strcmp(nombre,{'m','fn','zeta'}))
+        p.k = p.m*(2*pi*p.fn)^2;
+        p.c = 2*p.zeta*p.m*(2*pi*p.fn);
+    end
+end
